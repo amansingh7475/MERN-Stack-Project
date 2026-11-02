@@ -1,0 +1,179 @@
+import "./globals.css";
+import type { Metadata } from "next";
+import Script from "next/script";
+import { Manrope } from "next/font/google";
+import Providers from "../lib/react-query";
+import Navbar from "../component/navBar";
+import Footer from "../component/Footer/footer";
+import { Toaster } from "sonner";
+import { SITE_ORIGIN, DEFAULT_OG_IMAGE, ogImageUrl } from "../lib/siteUrl";
+import { pickCmsText } from "../lib/cmsText";
+import { fetchHomeSections, fetchMergedProducts, fetchMergedCategories } from "../services/cmsPublic";
+import BusinessGraphJsonLd from "../components/seo/BusinessGraphJsonLd";
+import { getServerLocale } from "../lib/serverLocale";
+import { getUrlLocale } from "../lib/urlLocale";
+import {
+  SITE_HTML_LANG,
+  SITE_OG_LOCALE,
+  SITE_SEO_LOCALE,
+  seoAlternates,
+  HOMEPAGE_SEO_DESCRIPTION,
+  withoutSeoPlaceholder,
+} from "../lib/pageMetadata";
+
+const manrope = Manrope({
+  subsets: ["latin"],
+  variable: "--font-manrope",
+  display: "swap",
+});
+
+const localeBootScript = `
+try {
+  // A /pl or /th URL prefix wins for this page only and is NOT persisted, so
+  // visiting /pl or /th never makes un-prefixed (English) URLs render in PL/TH.
+  var p = location.pathname.match(/^\\/(pl|th)(\\/|$)/);
+  if (p) {
+    var u = p[1].toUpperCase();
+    document.documentElement.dataset.locale = u;
+    document.documentElement.lang = p[1];
+    throw 0;
+  }
+  // Priority: cookie (server-side source of truth) → localStorage → default
+  var m = document.cookie.match(/(?:^|; )tk-locale=([^;]+)/);
+  var l = m ? decodeURIComponent(m[1]) : null;
+  
+  if (l !== 'EN' && l !== 'TH' && l !== 'PL') {
+    l = localStorage.getItem('tk-locale');
+  }
+  
+  if (l === 'EN' || l === 'TH' || l === 'PL') {
+    document.documentElement.dataset.locale = l;
+    document.documentElement.lang = l === 'TH' ? 'th' : l === 'PL' ? 'pl' : 'en';
+    // Sync back to cookie and localStorage
+    document.cookie = 'tk-locale=' + l + '; path=/; max-age=31536000; SameSite=Lax';
+    localStorage.setItem('tk-locale', l);
+  }
+} catch (e) {}
+`;
+
+const FALLBACK_TITLE = "Thailand Kitchens";
+const FALLBACK_DESCRIPTION = HOMEPAGE_SEO_DESCRIPTION;
+
+/**
+ * Site-wide default metadata (title/description/OG image), sourced from the
+ * admin panel's Header & SEO fields when set. This is the fallback every page
+ * inherits unless it defines its own generateMetadata — so any page without
+ * page-specific metadata still gets a real title/description/image instead of
+ * a blank/generic social preview.
+ */
+export async function generateMetadata(): Promise<Metadata> {
+  const home = await fetchHomeSections().catch(() => ({}) as Record<string, unknown>);
+  const seo = (home as { seo?: Record<string, unknown> })?.seo || {};
+  const hero = (home as { hero?: Record<string, unknown> })?.hero || {};
+
+  // Default (un-prefixed) URLs are English. Do not let Accept-Language or a
+  // UI locale cookie swap title/meta/OG into TH/PL — that is what caused
+  // lang="en" pages to ship Polish metadata.
+  const title = withoutSeoPlaceholder(
+    pickCmsText(seo.title, FALLBACK_TITLE, SITE_SEO_LOCALE),
+    FALLBACK_TITLE
+  );
+  const description = withoutSeoPlaceholder(
+    pickCmsText(seo.description, FALLBACK_DESCRIPTION, SITE_SEO_LOCALE),
+    FALLBACK_DESCRIPTION
+  );
+  const image = ogImageUrl(
+    (seo.ogImage as string) || (hero.image as string) || DEFAULT_OG_IMAGE
+  );
+
+  return {
+    metadataBase: new URL(SITE_ORIGIN),
+    // No `template` here — child pages already append " | Thailand Kitchens"
+    // to their own titles, and Next.js applies a parent template even to a
+    // child's plain-string title, which would double up the suffix.
+    title,
+    description,
+    alternates: await seoAlternates("/"),
+    // /pl and /th are noindex until translated (TODO DEV-02).
+    ...((await getUrlLocale()) ? { robots: { index: false, follow: true } } : {}),
+    openGraph: {
+      type: "website",
+      siteName: FALLBACK_TITLE,
+      title,
+      description,
+      url: SITE_ORIGIN,
+      locale: SITE_OG_LOCALE,
+      images: [{ url: image, width: 1200, height: 630, alt: title }],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [image],
+    },
+  };
+}
+
+export default async function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const ga4Id = process.env.NEXT_PUBLIC_GA4_MEASUREMENT_ID?.trim() || "";
+  const serverLocale = await getServerLocale();
+  const urlLocale = await getUrlLocale();
+
+  // Fetch initial CMS data to prevent content flash on first paint
+  const [sections, products, categories] = await Promise.all([
+    fetchHomeSections().catch(() => ({})),
+    fetchMergedProducts().catch(() => []),
+    fetchMergedCategories().catch(() => []),
+  ]);
+
+
+  const initialCmsData = {
+    sections,
+    products,
+    categories,
+  };
+
+  return (
+    <html
+      lang={urlLocale === "PL" ? "pl" : urlLocale === "TH" ? "th" : SITE_HTML_LANG}
+      data-locale={urlLocale || "EN"}
+      className={manrope.variable}
+      suppressHydrationWarning
+    >
+      <body className="font-sans antialiased" suppressHydrationWarning>
+        <BusinessGraphJsonLd />
+        <Script
+          id="tk-locale-boot"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: localeBootScript }}
+        />
+        {ga4Id ? (
+          <>
+            <Script
+              src={`https://www.googletagmanager.com/gtag/js?id=${ga4Id}`}
+              strategy="afterInteractive"
+            />
+            <Script id="tk-ga4" strategy="afterInteractive">
+              {`
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', '${ga4Id}');
+              `}
+            </Script>
+          </>
+        ) : null}
+        <Providers initialLocale={serverLocale} initialCmsData={initialCmsData}>
+          <Navbar />
+          {children}
+          <Footer />
+          <Toaster position="top-right" richColors closeButton />
+        </Providers>
+      </body>
+    </html>
+  );
+}
